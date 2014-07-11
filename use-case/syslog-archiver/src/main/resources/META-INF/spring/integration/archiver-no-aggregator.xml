@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans:beans xmlns="http://www.springframework.org/schema/integration"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:beans="http://www.springframework.org/schema/beans"
+	xmlns:int-file="http://www.springframework.org/schema/integration/file"
+	xmlns:int-amqp="http://www.springframework.org/schema/integration/amqp"
+	xmlns:context="http://www.springframework.org/schema/context"
+	xmlns:int-syslog="http://www.springframework.org/schema/integration/syslog"
+	xmlns:rabbit="http://www.springframework.org/schema/rabbit"
+	xmlns:gfe="http://www.springframework.org/schema/gemfire"
+	xmlns:int-gfe="http://www.springframework.org/schema/integration/gemfire"
+	xmlns:p="http://www.springframework.org/schema/p"
+	xmlns:task="http://www.springframework.org/schema/task"
+	xmlns:util="http://www.springframework.org/schema/util"
+	xsi:schemaLocation="http://www.springframework.org/schema/integration/syslog http://www.springframework.org/schema/integration/syslog/spring-integration-syslog.xsd
+		http://www.springframework.org/schema/integration/gemfire http://www.springframework.org/schema/integration/gemfire/spring-integration-gemfire.xsd
+		http://www.springframework.org/schema/integration/amqp http://www.springframework.org/schema/integration/amqp/spring-integration-amqp.xsd
+		http://www.springframework.org/schema/gemfire http://www.springframework.org/schema/gemfire/spring-gemfire.xsd
+		http://www.springframework.org/schema/integration http://www.springframework.org/schema/integration/spring-integration.xsd
+		http://www.springframework.org/schema/integration/file http://www.springframework.org/schema/integration/file/spring-integration-file.xsd
+		http://www.springframework.org/schema/task http://www.springframework.org/schema/task/spring-task.xsd
+		http://www.springframework.org/schema/rabbit http://www.springframework.org/schema/rabbit/spring-rabbit.xsd
+		http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
+		http://www.springframework.org/schema/util http://www.springframework.org/schema/util/spring-util-4.0.xsd
+		http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context.xsd">
+
+	<context:property-placeholder location="archiver.properties" />
+	
+	<gfe:client-cache id="clientCache" pool-name="clientPool"/>
+	<gfe:client-region id="Syslog" cache-ref="clientCache"/>
+	
+	<gfe:pool id="clientPool">
+		<gfe:locator host="localhost" port="44444" />
+	</gfe:pool>
+	
+	<beans:bean class="com.pivotal.archiver.ObjectViewer">
+		<beans:property name="object" ref="Syslog"/>
+	</beans:bean>
+	<beans:bean id="gemfireSyslogRegionTemplate" 
+				class="org.springframework.data.gemfire.GemfireTemplate" 
+				p:region-ref="Syslog"/>
+	
+	<channel id="fromAmqp">
+		<dispatcher task-executor="executor" />
+	</channel>
+	<task:executor id="executor" pool-size="10" rejection-policy="CALLER_RUNS"/>
+	
+	<channel id="syslogObject"/>
+	<transformer id="syslogToPojo" 
+					input-channel="fromAmqp"
+					method="fromSyslogToPojo" 
+					output-channel="syslogObject">		
+		<beans:bean class="com.pivotal.archiver.transformer.SyslogToPojoTransformer" />		
+	</transformer>
+	
+	<service-activator input-channel="syslogObject" method="writeInCache" ref="writer" />
+	<!-- 
+	<service-activator input-channel="syslogObject" method="writeInCache" ref="writer" />
+	-->
+	<beans:bean id="writer" class="com.pivotal.archiver.cache.GemfireWriter">
+		<beans:property name="gemfireTemplate" ref="gemfireSyslogRegionTemplate" />
+	</beans:bean>
+
+	<rabbit:connection-factory id="connectionFactory" host="localhost" port="5672" />
+	<int-amqp:inbound-channel-adapter
+		connection-factory="connectionFactory" concurrent-consumers="10"
+		channel="fromAmqp" queue-names="si-syslog.message.queue"
+		prefetch-count="50" mapped-request-headers="syslog_*" />
+
+</beans:beans>

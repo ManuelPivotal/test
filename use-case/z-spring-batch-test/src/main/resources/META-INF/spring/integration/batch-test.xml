@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans:beans xmlns="http://www.springframework.org/schema/integration"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:beans="http://www.springframework.org/schema/beans"
+	xmlns:int-file="http://www.springframework.org/schema/integration/file"
+	xmlns:int-amqp="http://www.springframework.org/schema/integration/amqp"
+	xmlns:context="http://www.springframework.org/schema/context"
+	xmlns:int-syslog="http://www.springframework.org/schema/integration/syslog"
+	xmlns:rabbit="http://www.springframework.org/schema/rabbit" xmlns:task="http://www.springframework.org/schema/task"
+	xmlns:int-jmx="http://www.springframework.org/schema/integration/jmx"
+	xmlns:batch-int="http://www.springframework.org/schema/batch-integration"
+	xmlns:batch="http://www.springframework.org/schema/batch"
+	xsi:schemaLocation="http://www.springframework.org/schema/integration/syslog http://www.springframework.org/schema/integration/syslog/spring-integration-syslog.xsd
+ 		http://www.springframework.org/schema/batch http://www.springframework.org/schema/batch/spring-batch.xsd
+ 		http://www.springframework.org/schema/batch-integration	http://www.springframework.org/schema/batch-integration/spring-batch-integration.xsd
+    	http://www.springframework.org/schema/integration/amqp http://www.springframework.org/schema/integration/amqp/spring-integration-amqp.xsd
+		http://www.springframework.org/schema/integration http://www.springframework.org/schema/integration/spring-integration.xsd
+		http://www.springframework.org/schema/integration/file http://www.springframework.org/schema/integration/file/spring-integration-file.xsd
+		http://www.springframework.org/schema/integration/jmx http://www.springframework.org/schema/integration/jmx/spring-integration-jmx-4.0.xsd
+		http://www.springframework.org/schema/task http://www.springframework.org/schema/task/spring-task.xsd
+		http://www.springframework.org/schema/rabbit http://www.springframework.org/schema/rabbit/spring-rabbit.xsd
+		http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
+		http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context.xsd">
+
+	<int-jmx:mbean-export default-domain="ingester" />
+	<context:mbean-server />
+
+	<channel id="fileToBatch" />
+	<int-file:inbound-channel-adapter id="logfiles"
+		channel="fileToBatch" directory="c:/devs/logs" filename-pattern="*.csv">
+		<poller id="poller" fixed-rate="1000" />
+	</int-file:inbound-channel-adapter>
+
+	<channel id="fileToJobRequest" />
+	<transformer ref="fileToJobRequest" input-channel="fileToBatch" output-channel="fileToLaunchRequest" />
+
+	<batch-int:job-launching-gateway
+		request-channel="fileToLaunchRequest" id="lauchingGateway" />
+
+	<beans:bean id="jobRepository" class="org.springframework.batch.core.repository.support.MapJobRepositoryFactoryBean"/>
+	<beans:bean  id="transactionManager" class="org.springframework.batch.support.transaction.ResourcelessTransactionManager"/>
+	<beans:bean id="jobLauncher" class="org.springframework.batch.core.launch.support.SimpleJobLauncher">
+		<beans:property name="jobRepository" ref="jobRepository" />
+	</beans:bean>
+
+ 	<beans:bean id="jobRegistry" class="org.springframework.batch.core.configuration.support.MapJobRegistry" />
+	<batch:job id="csvParser">
+		<batch:step id="csvStep">
+			<batch:tasklet>
+				<batch:chunk reader="itemReader" writer="itemWriter"
+					processor="itemProcessor" commit-interval="10" />
+			</batch:tasklet>
+		</batch:step>
+	</batch:job>
+	<beans:bean name="itemReader" class="org.springframework.batch.item.file.FlatFileItemReader">
+		<beans:property name="lineMapper">
+			<beans:bean class="org.springframework.batch.item.file.mapping.DefaultLineMapper">
+				<beans:property name="lineTokenizer">
+					<beans:bean class="org.springframework.batch.item.file.transform.DelimitedLineTokenizer">
+						<beans:property name="delimiter" value=","/>
+					</beans:bean>
+				</beans:property>
+				<beans:property name="fieldSetMapper">
+					<beans:bean class="org.springframework.batch.item.file.mapping.ArrayFieldSetMapper"/>
+				</beans:property>
+			</beans:bean>
+		</beans:property>
+	</beans:bean>
+	<beans:bean name="itemWriter" class="org.springframework.batch.item.file.FlatFileItemWriter">
+		<beans:property name="lineAggregator">
+			<beans:bean class="org.springframework.batch.item.file.transform.DelimitedLineAggregator"/>
+		</beans:property>
+<!-- 	
+		<beans:property name="lineMapper">
+			<beans:bean class="org.springframework.batch.item.file.mapping.DefaultLineMapper">
+				<beans:property name="lineTokenizer">
+					<beans:bean class="org.springframework.batch.item.file.transform.DelimitedLineTokenizer">
+						<beans:property name="delimiter" value=","/>
+					</beans:bean>
+				</beans:property>
+				<beans:property name="fieldSetMapper">
+					<beans:bean class="org.springframework.batch.item.file.mapping.ArrayFieldSetMapper"/>
+				</beans:property>
+			</beans:bean>
+		</beans:property>
+		
+ -->	</beans:bean>
+	<beans:bean name="itemProcessor" class="com.pivotal.integration.processor.SyslogItemProcessor" />
+
+	<beans:bean id="fileToJobRequest" class="com.pivotal.integration.transformer.FileToJobLaunchRequest">
+			<beans:property name="parameterName" value="input.file.name" />
+			<beans:property name="job" ref="csvParser" />
+	</beans:bean>
+</beans:beans>

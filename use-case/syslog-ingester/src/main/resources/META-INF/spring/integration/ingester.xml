@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans:beans xmlns="http://www.springframework.org/schema/integration"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:beans="http://www.springframework.org/schema/beans"
+	xmlns:int-file="http://www.springframework.org/schema/integration/file"
+	xmlns:int-amqp="http://www.springframework.org/schema/integration/amqp"
+	xmlns:context="http://www.springframework.org/schema/context"
+	xmlns:int-syslog="http://www.springframework.org/schema/integration/syslog"
+	xmlns:rabbit="http://www.springframework.org/schema/rabbit"
+	xmlns:task="http://www.springframework.org/schema/task"
+	xmlns:int-jmx="http://www.springframework.org/schema/integration/jmx"
+	xsi:schemaLocation="http://www.springframework.org/schema/integration/syslog http://www.springframework.org/schema/integration/syslog/spring-integration-syslog.xsd
+		http://www.springframework.org/schema/integration/amqp http://www.springframework.org/schema/integration/amqp/spring-integration-amqp.xsd
+		http://www.springframework.org/schema/integration http://www.springframework.org/schema/integration/spring-integration.xsd
+		http://www.springframework.org/schema/integration/file http://www.springframework.org/schema/integration/file/spring-integration-file.xsd
+		http://www.springframework.org/schema/integration/jmx http://www.springframework.org/schema/integration/jmx/spring-integration-jmx-4.0.xsd
+		http://www.springframework.org/schema/task http://www.springframework.org/schema/task/spring-task.xsd
+		http://www.springframework.org/schema/rabbit http://www.springframework.org/schema/rabbit/spring-rabbit.xsd
+		http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
+		http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context.xsd">
+
+	<int-jmx:mbean-export default-domain="ingester"/>
+	<context:mbean-server/>
+	
+	<context:property-placeholder location="ingester.properties" />
+	
+
+	<int-file:inbound-channel-adapter id="logfiles"
+			channel="filesToParse" directory="${ingester.dropfiledirectory}"
+			filename-pattern="${ingester.filepattern}">
+		<poller id="poller" fixed-rate="${ingester.pollerrate}" />
+	</int-file:inbound-channel-adapter>
+
+	<channel id="filesToParse" />
+	<channel id="rawLineChannel" />
+
+	<service-activator input-channel="filesToParse" ref="logFileHandler" method="processFile">
+	</service-activator>
+
+	<beans:bean id="logFileHandler" class="com.pivotal.ingester.handler.LogfileHandler">
+		<beans:property name="outputChannel" ref="rawLineChannel" />
+	</beans:bean>
+
+	<transformer id="rawlineToSyslogTransformer" input-channel="rawLineChannel"
+		method="fromSyslog" output-channel="outputChannel">
+		<beans:bean class="org.springframework.integration.syslog.DefaultMessageConverter" />
+	</transformer>
+
+	<int-syslog:inbound-channel-adapter id="syslogIn" channel="outputChannel" port="1514" />
+
+	<channel id="outputChannel"/>
+	<channel id="amqpChannel"/>
+	
+	<transformer id="syslogToMessage" 
+					input-channel="outputChannel"
+					method="fromSyslogToMessage" 
+					output-channel="amqpChannel">		
+		<beans:bean class="com.pivotal.ingester.message.transformer.SyslogToMessage" />		
+	</transformer>
+	
+	<rabbit:connection-factory id="connectionFactory" host="localhost" port="5672" publisher-confirms="true"/>
+	<rabbit:template id="amqpTemplate" connection-factory="connectionFactory" />
+ 	<rabbit:admin connection-factory="connectionFactory" />
+ 
+	<rabbit:direct-exchange name="si-syslog.message.exchange"/>
+ 	
+ 	<rabbit:template id="syslogAmqpTemplate" 
+ 					connection-factory="connectionFactory" 
+ 					/>
+ 					
+	<int-amqp:outbound-channel-adapter
+		channel="amqpChannel" amqp-template="syslogAmqpTemplate" exchange-name="si-syslog.message.exchange"
+		routing-key="syslog.message" 
+		default-delivery-mode="NON_PERSISTENT"
+		mapped-request-headers="*"/>
+
+</beans:beans>

@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans:beans xmlns="http://www.springframework.org/schema/integration"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:beans="http://www.springframework.org/schema/beans"
+	xmlns:int-amqp="http://www.springframework.org/schema/integration/amqp"
+	xmlns:context="http://www.springframework.org/schema/context"
+	xmlns:rabbit="http://www.springframework.org/schema/rabbit" xmlns:gfe="http://www.springframework.org/schema/gemfire"
+	xmlns:int-gfe="http://www.springframework.org/schema/integration/gemfire"
+	xmlns:p="http://www.springframework.org/schema/p" xmlns:task="http://www.springframework.org/schema/task"
+	xmlns:util="http://www.springframework.org/schema/util" xmlns:gfe-data="http://www.springframework.org/schema/data/gemfire"
+	xmlns:int-jmx="http://www.springframework.org/schema/integration/jmx"
+	xsi:schemaLocation="http://www.springframework.org/schema/integration/gemfire http://www.springframework.org/schema/integration/gemfire/spring-integration-gemfire.xsd
+		http://www.springframework.org/schema/integration/amqp http://www.springframework.org/schema/integration/amqp/spring-integration-amqp-4.0.xsd
+		http://www.springframework.org/schema/gemfire http://www.springframework.org/schema/gemfire/spring-gemfire.xsd
+		http://www.springframework.org/schema/integration http://www.springframework.org/schema/integration/spring-integration-4.0.xsd
+		http://www.springframework.org/schema/integration/jmx http://www.springframework.org/schema/integration/jmx/spring-integration-jmx-4.0.xsd
+		http://www.springframework.org/schema/task http://www.springframework.org/schema/task/spring-task.xsd
+		http://www.springframework.org/schema/rabbit http://www.springframework.org/schema/rabbit/spring-rabbit.xsd
+		http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
+		http://www.springframework.org/schema/util http://www.springframework.org/schema/util/spring-util-4.0.xsd
+		http://www.springframework.org/schema/data/gemfire http://www.springframework.org/schema/data/gemfire/spring-data-gemfire-1.4.xsd
+		http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context.xsd">
+
+	<int-jmx:mbean-export default-domain="archiver" />
+	<context:mbean-server />
+
+	<context:property-placeholder location="archiver.properties" />
+
+	<!-- AMQP Configuration and inbound channel -->
+	<rabbit:connection-factory id="connectionFactory" host="localhost" port="5672" />
+	<int-amqp:inbound-channel-adapter
+		connection-factory="connectionFactory" concurrent-consumers="2"
+		channel="fromAmqp" queue-names="si-syslog.message.queue"
+		prefetch-count="10" mapped-request-headers="*" />
+
+	<!-- Gemfire connection and region bean creation -->
+	<gfe:pool id="clientPool">
+		<gfe:locator host="localhost" port="44444" />
+	</gfe:pool>
+	<gfe:client-cache id="clientCache" pool-name="clientPool" />
+	<gfe:client-region id="Syslog" cache-ref="clientCache" pool-name="clientPool" />
+
+	<!-- Creation of a gemfire template on top of the syslog region -->
+	<beans:bean id="gemfireSyslogRegionTemplate"
+		class="org.springframework.data.gemfire.GemfireTemplate" p:region-ref="Syslog" />
+
+	<!-- - declaring a multithreaded dispatcher on the AMQP channel -->
+	<channel id="fromAmqp">
+		<dispatcher task-executor="executor" />
+	</channel>
+	<task:executor id="executor" pool-size="2"	rejection-policy="CALLER_RUNS" />
+	<!-- - chaining 1. the transformation of the AMQP message into a domain 
+		object 2. aggregating the POJO into a list for the Gemfire write to be more 
+		efficient -->
+	<chain auto-startup="true" input-channel="fromAmqp"
+		output-channel="syslogObjects">
+		<transformer method="fromSyslogToPojo">
+			<beans:bean class="com.pivotal.archiver.transformer.SyslogToPojoTransformer" />
+		</transformer>
+		<aggregator id="messageAggregator" message-store="messageStore"
+			release-strategy="releaseStrategy" correlation-strategy-expression="0"
+			expire-groups-upon-completion="true" send-partial-result-on-expiry="true" />
+	</chain>
+ 	<beans:bean id="messageStore" class="org.springframework.integration.store.SimpleMessageStore"/>
+	<beans:bean id="reaper" class="org.springframework.integration.store.MessageGroupStoreReaper">
+		<beans:property name="messageGroupStore" ref="messageStore" />
+		<beans:property name="timeout" value="100" />
+	</beans:bean>
+	
+	<task:scheduled-tasks>
+		<task:scheduled ref="reaper" method="run" fixed-rate="100" />
+	</task:scheduled-tasks>
+	
+	<!-- <beans:bean id="messageStore" class="org.springframework.integration.store.SimpleMessageStore"/> -->
+	<beans:bean id="releaseStrategy" class="org.springframework.integration.aggregator.TimeoutCountSequenceSizeReleaseStrategy">
+		<beans:constructor-arg index="0" value="1000" /> <!-- Threshold -->
+		<beans:constructor-arg index="1" value="100" /><!-- Timeout -->
+	</beans:bean>
+
+	<!-- Doing a putAll() into gemfire of the previously generated list. -->
+	<service-activator input-channel="syslogObjects" method="writeMultipleInCache" ref="writer" />
+	<beans:bean id="writer" class="com.pivotal.archiver.cache.GemfireWriter">
+		<beans:property name="gemfireTemplate" ref="gemfireSyslogRegionTemplate" />
+	</beans:bean>
+	
+</beans:beans>
